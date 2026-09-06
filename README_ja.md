@@ -539,7 +539,7 @@ clone から実行してください（`pip install -e .`）。
 </details>
 
 <details>
-<summary><b>ブローカー connectors</b> <sub>14 ブローカー — read + paper、対応先では bounded-live</sub></summary>
+<summary><b>ブローカー connectors</b> <sub>15 ブローカー — read + paper、対応先では bounded-live</sub></summary>
 
 connector-first のプロファイル。多くは read + ペーパー口座での発注に対応します —— IBKR は読み取り専用、Robinhood はライブのみ（ペーパー口座なし）、Trading 212 はペーパーを含め発注を一切拒否します。ライブ発注はユーザーが定義した mandate（銘柄許可リスト、発注サイズ / エクスポージャー上限、1 日の取引回数上限、即時 kill switch）で制限され、資金を預かることは一切ありません —— 執行するのはブローカーです。発注系ツールは MCP に公開されません（agent + CLI のみ）。リサーチ / バックテスト経路は構造的にあらゆるライブ endpoint から遮断されています。
 
@@ -555,6 +555,7 @@ connector-first のプロファイル。多くは read + ペーパー口座で�
 | **MetaTrader 5** | forex / CFD | read + paper + bounded live (Exness-style; demo ⇔ paper identity guard) |
 | **Longbridge** · **Dhan** · **Shoonya** · **Zerodha** | US / HK · India (NSE/BSE) | read + paper only — no runtime paper/live discriminator, so live order placement is hard-refused |
 | **Trading 212** | UK / EU | fully read-only — `place_order` / `cancel_order` hard-refuse even paper |
+| **Polymarket** | 予測市場 | read（公開 Gamma/Data API、キー不要）+ **ローカルでシミュレートされた** paper のみ — ベンダー製デモ口座なし、ライブ発注は未対応 |
 
 Paper-vs-live is a **structural per-broker runtime guard** (account-id format, host separation, demo flag, or trade environment), never a config flag the agent can flip. A broker exposing no such discriminator is capped at paper + read-only.
 

@@ -98,6 +98,13 @@ _CONNECTOR_COMPATIBILITY: dict[str, PortfolioCompatibility] = {
         "open_positions",
         "Account totals and instrument quote resolution require verification.",
     ),
+    "polymarket": PortfolioCompatibility(
+        "experimental",
+        1,
+        "prediction_markets",
+        "Paper balances are a local simulation (no vendor demo account); "
+        "live-readonly valuation currency mapping is not supported yet.",
+    ),
 }
 
 _EXPERIMENTAL_DEFAULT = PortfolioCompatibility(

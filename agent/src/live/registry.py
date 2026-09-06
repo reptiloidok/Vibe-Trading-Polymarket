@@ -31,6 +31,7 @@ from src.trading.connectors.ibkr.classification import IBKR_TOOL_CLASS
 from src.trading.connectors.longbridge.classification import LONGBRIDGE_TOOL_CLASS
 from src.trading.connectors.mt5.classification import MT5_TOOL_CLASS
 from src.trading.connectors.okx.classification import OKX_TOOL_CLASS
+from src.trading.connectors.polymarket.classification import POLYMARKET_TOOL_CLASS
 from src.trading.connectors.robinhood.classification import ROBINHOOD_TOOL_CLASS
 from src.trading.connectors.shoonya.classification import SHOONYA_TOOL_CLASS
 from src.trading.connectors.tiger.classification import TIGER_TOOL_CLASS
@@ -52,6 +53,7 @@ _BROKER_CURATED_MAPS = {
     "alpaca": ALPACA_TOOL_CLASS,
     "okx": OKX_TOOL_CLASS,
     "binance": BINANCE_TOOL_CLASS,
+    "polymarket": POLYMARKET_TOOL_CLASS,
     "futu": FUTU_TOOL_CLASS,
     "dhan": DHAN_TOOL_CLASS,
     "shoonya": SHOONYA_TOOL_CLASS,
