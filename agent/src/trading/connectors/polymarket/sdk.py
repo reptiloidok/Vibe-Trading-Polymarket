@@ -233,7 +233,17 @@ def get_quote(symbol: str, *, config: PolymarketConfig | None = None, **_: Any) 
         "profile": cfg.profile,
         "symbol": symbol,
         "market": market,
-        "quote": {"outcomes": market["outcomes"], "prices": market["prices"], "yes_price": yes_price},
+        "quote": {
+            # bid/ask/close: Polymarket exposes a last-traded outcome price, not
+            # a resting bid/ask spread or a session close, so those stay unset
+            # (the generic connector-quote renderer shows them blank) rather
+            # than faking a number the CLOB never reported.
+            "last": yes_price,
+            "volume": market["volume"],
+            "outcomes": market["outcomes"],
+            "prices": market["prices"],
+            "yes_price": yes_price,
+        },
     }
 
 
@@ -317,11 +327,84 @@ def _resolve_outcome(market: dict[str, Any], side: str) -> str:
     raise PolymarketAPIError(f"unrecognized side {side!r}; use 'yes'/'no' or an outcome label")
 
 
+def _position_row(pos: dict[str, Any]) -> dict[str, Any]:
+    """Add the generic connector-table field names on top of the native ones.
+
+    The shared CLI/Web position renderers read ``symbol`` / ``quantity`` /
+    ``avg_cost`` / ``currency`` (see ``cmd_connector_positions`` and its
+    ``_first_present`` fallback for the Longbridge-style schema); this keeps
+    the paper ledger's own field names (``outcome``, ``shares``,
+    ``avg_price``) as the source of truth and layers the aliases on read.
+    """
+    return {
+        **pos,
+        "symbol": f"{pos['question']} [{pos['outcome']}]",
+        "quantity": pos["shares"],
+        "avg_cost": pos["avg_price"],
+        "currency": "USDC (simulated)",
+    }
+
+
 def _outcome_price(market: dict[str, Any], outcome: str) -> float | None:
     for o, p in zip(market["outcomes"], market["prices"]):
         if o == outcome:
             return p
     return None
+
+
+def _settle_ledger(cfg: PolymarketConfig, ledger: dict[str, Any]) -> bool:
+    """Settle any paper position whose market has closed, in place.
+
+    A closed Polymarket market's ``outcomePrices`` collapse to the payout
+    (1.0 for the winning outcome, 0.0 otherwise), so settlement reuses the
+    same Gamma read `get_quote` already uses — no separate resolution feed.
+    A market that cannot be re-fetched (network hiccup, deleted market) is
+    left open rather than settled at a guessed price. Mirrors the standalone
+    ``Poly_trade`` resolver this connector was adapted from.
+
+    Returns:
+        Whether the ledger changed (so the caller knows to persist it).
+    """
+    changed = False
+    for key in list(ledger["positions"].keys()):
+        pos = ledger["positions"][key]
+        if pos["shares"] <= 1e-9:
+            continue
+        try:
+            market = _find_market(pos["condition_id"], timeout=cfg.timeout)
+        except PolymarketAPIError:
+            continue
+        if not market["closed"]:
+            continue
+        payout_price = _outcome_price(market, pos["outcome"]) or 0.0
+        proceeds = pos["shares"] * payout_price
+        pnl = proceeds - pos["shares"] * pos["avg_price"]
+        ledger["balance"] += proceeds
+        ledger.setdefault("closed_positions", []).append(
+            {
+                "condition_id": pos["condition_id"],
+                "question": pos["question"],
+                "outcome": pos["outcome"],
+                "shares": pos["shares"],
+                "avg_price": pos["avg_price"],
+                "payout_price": payout_price,
+                "proceeds": proceeds,
+                "pnl": pnl,
+                "won": payout_price > 0.5,
+                "resolved_ts": time.time(),
+            }
+        )
+        del ledger["positions"][key]
+        changed = True
+    return changed
+
+
+def _load_and_settle_ledger(cfg: PolymarketConfig) -> dict[str, Any]:
+    """Load the paper ledger and settle any newly closed markets before use."""
+    ledger = _load_ledger(cfg)
+    if _settle_ledger(cfg, ledger):
+        _save_ledger(cfg, ledger)
+    return ledger
 
 
 # ---------------------------------------------------------------------------
@@ -359,18 +442,34 @@ def check_status(config: PolymarketConfig | None = None) -> dict[str, Any]:
 
 
 def get_account_snapshot(config: PolymarketConfig | None = None) -> dict[str, Any]:
-    """Fetch account balance/equity for the configured profile."""
+    """Fetch account balance/equity for the configured profile.
+
+    Paper accounts settle any newly closed markets first, so ``balance`` and
+    ``realized_pnl`` always reflect resolutions as of this call.
+    """
     cfg = config or load_config()
     if cfg.profile == "paper":
-        ledger = _load_ledger(cfg)
-        equity = ledger["balance"] + sum(
-            p["shares"] * p["avg_price"] for p in ledger["positions"].values()
-        )
+        ledger = _load_and_settle_ledger(cfg)
+        open_positions = [p for p in ledger["positions"].values() if p["shares"] > 1e-9]
+        closed = ledger.get("closed_positions", [])
+        equity = ledger["balance"] + sum(p["shares"] * p["avg_price"] for p in open_positions)
+        realized_pnl = sum(c["pnl"] for c in closed)
+        wins = sum(1 for c in closed if c["won"])
         return {
             "status": "ok",
             "profile": cfg.profile,
             "paper_guard": PAPER_GUARD,
-            "account": {"balance": ledger["balance"], "equity": equity, "currency": "USDC (simulated)"},
+            "account": {
+                "balance": ledger["balance"],
+                "equity": equity,
+                "currency": "USDC (simulated)",
+                "realized_pnl": realized_pnl,
+                "open_positions": len(open_positions),
+                "resolved_positions": len(closed),
+                "wins": wins,
+                "losses": len(closed) - wins,
+                "win_rate": (wins / len(closed)) if closed else None,
+            },
         }
     if not cfg.wallet_address:
         return {"status": "error", "error": "wallet_address is required for polymarket-live-readonly"}
@@ -383,13 +482,23 @@ def get_account_snapshot(config: PolymarketConfig | None = None) -> dict[str, An
     }
 
 
-def get_positions(config: PolymarketConfig | None = None) -> dict[str, Any]:
-    """List open positions for the configured profile."""
+def get_positions(config: PolymarketConfig | None = None, *, include_closed: bool = False) -> dict[str, Any]:
+    """List open positions for the configured profile.
+
+    Paper accounts settle any newly closed markets first. Pass
+    ``include_closed`` to also return resolved positions with their payout
+    and realized P&L.
+    """
     cfg = config or load_config()
     if cfg.profile == "paper":
-        ledger = _load_ledger(cfg)
-        positions = [p for p in ledger["positions"].values() if p["shares"] > 1e-9]
-        return {"status": "ok", "profile": cfg.profile, "paper_guard": PAPER_GUARD, "positions": positions}
+        ledger = _load_and_settle_ledger(cfg)
+        positions = [
+            _position_row(p) for p in ledger["positions"].values() if p["shares"] > 1e-9
+        ]
+        result = {"status": "ok", "profile": cfg.profile, "paper_guard": PAPER_GUARD, "positions": positions}
+        if include_closed:
+            result["closed_positions"] = ledger.get("closed_positions", [])
+        return result
     if not cfg.wallet_address:
         return {"status": "error", "error": "wallet_address is required for polymarket-live-readonly"}
     rows = _get("/positions", base=DATA_API_BASE, params={"user": cfg.wallet_address}, timeout=cfg.timeout)
@@ -406,7 +515,7 @@ def get_open_orders(config: PolymarketConfig | None = None, *, include_execution
     cfg = config or load_config()
     if cfg.profile != "paper":
         return {"status": "error", "error": "live order history is not implemented for polymarket-live-readonly"}
-    ledger = _load_ledger(cfg)
+    ledger = _load_and_settle_ledger(cfg)
     result: dict[str, Any] = {"status": "ok", "profile": cfg.profile, "paper_guard": PAPER_GUARD, "orders": []}
     if include_executions:
         result["history"] = ledger.get("fills", [])
@@ -443,6 +552,8 @@ def place_order(
             "error": "polymarket order placement is only supported on paper profiles in this version",
         }
     market = _find_market(symbol, timeout=cfg.timeout)
+    if market["closed"]:
+        return {"status": "error", "error": f"market {symbol!r} is already closed/resolved"}
     outcome = _resolve_outcome(market, side)
     price = _outcome_price(market, outcome)
     if not price or price <= 0:
@@ -452,7 +563,7 @@ def place_order(
     shares = float(quantity) if quantity is not None else float(notional) / price
     cost = shares * price
 
-    ledger = _load_ledger(cfg)
+    ledger = _load_and_settle_ledger(cfg)
     if cost > ledger["balance"] + 1e-9:
         return {
             "status": "error",

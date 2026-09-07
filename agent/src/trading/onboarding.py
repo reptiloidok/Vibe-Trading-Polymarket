@@ -118,6 +118,20 @@ _BUILTIN: dict[str, ConnectorOnboarding] = {
         install_command='pip install "vibe-trading-ai[mt5]" keyring',
         setup_hint="MetaTrader5 is Windows-only and requires a local terminal session.",
     ),
+    "polymarket": ConnectorOnboarding(
+        auth_type="wallet_address",
+        credential_fields=(
+            _field("wallet_address", "Wallet Address (public, read-only)", secret=False, required=False),
+        ),
+        dependency="requests",
+        install_command="pip install keyring",
+        test_operation="account.read",
+        setup_hint=(
+            "Paper profiles need nothing here. polymarket-live-readonly reads a "
+            "public wallet's positions by address only -- never enter a private "
+            "key or seed phrase; none is ever requested."
+        ),
+    ),
     "okx": ConnectorOnboarding(
         auth_type="api_key",
         credential_fields=(

@@ -103,6 +103,40 @@ def test_paper_place_order_buys_and_updates_ledger() -> None:
     assert positions[0]["shares"] == pytest.approx(150.0)
 
 
+def test_paper_settlement_credits_balance_and_records_pnl(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = pm_sdk.PolymarketConfig(profile="paper", starting_balance=1000.0)
+
+    # Buy 100 Yes shares at 0.65 while the market is still open.
+    monkeypatch.setattr(pm_sdk, "_find_market", lambda symbol, **_: dict(_MARKET_ROW))
+    filled = pm_sdk.place_order(cfg, symbol="12345", side="yes", quantity=100)
+    assert filled["status"] == "ok"
+
+    # The market resolves Yes: outcomePrices collapse to [1.0, 0.0].
+    resolved_row = {**_MARKET_ROW, "closed": True, "prices": [1.0, 0.0]}
+    monkeypatch.setattr(pm_sdk, "_find_market", lambda symbol, **_: dict(resolved_row))
+
+    snapshot = pm_sdk.get_account_snapshot(cfg)["account"]
+    assert snapshot["balance"] == pytest.approx(935.0 + 100.0)  # 65 spent, 100 paid out
+    assert snapshot["realized_pnl"] == pytest.approx(35.0)
+    assert snapshot["open_positions"] == 0
+    assert snapshot["resolved_positions"] == 1
+    assert snapshot["wins"] == 1
+    assert snapshot["win_rate"] == pytest.approx(1.0)
+
+    positions = pm_sdk.get_positions(cfg, include_closed=True)
+    assert positions["positions"] == []
+    assert len(positions["closed_positions"]) == 1
+    assert positions["closed_positions"][0]["pnl"] == pytest.approx(35.0)
+
+
+def test_paper_place_order_refuses_a_closed_market(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = pm_sdk.PolymarketConfig(profile="paper")
+    monkeypatch.setattr(pm_sdk, "_find_market", lambda symbol, **_: {**_MARKET_ROW, "closed": True})
+    result = pm_sdk.place_order(cfg, symbol="12345", side="yes", quantity=1)
+    assert result["status"] == "error"
+    assert "closed" in result["error"]
+
+
 def test_paper_place_order_rejects_insufficient_balance() -> None:
     cfg = pm_sdk.PolymarketConfig(profile="paper", starting_balance=10.0)
     result = pm_sdk.place_order(cfg, symbol="12345", side="yes", quantity=100)
